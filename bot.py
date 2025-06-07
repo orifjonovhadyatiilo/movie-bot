@@ -202,3 +202,22 @@ async def fallback_handler(message: types.Message):
 # ===== Start polling =====
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return 'Bot is running!'
+
+def run_http_server():
+    app.run(host='0.0.0.0', port=10000)
+
+if __name__ == '__main__':
+    # Flask serverini boshqa threadda ishga tushuramiz
+    threading.Thread(target=run_http_server).start()
+
+    # Bu yerda sizning telegram botingizni ishga tushirish kodi
+    from your_bot_module import main
+    main()
