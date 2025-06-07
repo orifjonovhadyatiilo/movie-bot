@@ -110,7 +110,7 @@ async def check_subs_callback(call: types.CallbackQuery):
         await call.answer("❌ Hali ham barcha kanallarga obuna bo‘lmagansiz!", show_alert=True)
 
 # ===== Admin kino va qism qo‘shish =====
-@dp.message_handler(lambda m: m.text in ["🎬 Kino qo‘shish", "🎞 Qism qo‘shish"])
+@dp.message_handler(lambda message: message.text in ["🎬 Kino qo‘shish", "🎞 Qism qo‘shish"])
 async def admin_step_1(message: types.Message):
     if message.from_user.id not in admin_ids:
         return
