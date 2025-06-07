@@ -1,5 +1,3 @@
-# FULL BOT FILE: movie bot + admin panel + dynamic required channel add/remove + polling + http server
-
 import os
 import threading
 from flask import Flask
@@ -124,22 +122,22 @@ async def handle_admin_video(message: types.Message):
     ADMIN_STATE[message.from_user.id]["file_id"] = message.video.file_id
     await message.answer("🔤 Endi kino kodini yuboring (masalan: abc123)")
 
-@dp.message_handler(lambda m: m.from_user.id in ADMIN_STATE and "file_id" in ADMIN_STATE[m.from_user.id] and "code" not in ADMIN_STATE[m.from_user.id])
+@dp.message_handler(lambda message: message.from_user.id in ADMIN_STATE and "file_id" in ADMIN_STATE[message.from_user.id] and "code" not in ADMIN_STATE[message.from_user.id])
 async def handle_admin_code(message: types.Message):
-    ADMIN_STATE[m.from_user.id]["code"] = message.text.strip()
-    if ADMIN_STATE[m.from_user.id]["mode"] == "part":
+    ADMIN_STATE[message.from_user.id]["code"] = message.text.strip()
+    if ADMIN_STATE[message.from_user.id]["mode"] == "part":
         await message.answer("📛 Endi qismini nomini yozing (masalan: 1-qism)")
     else:
-        code = ADMIN_STATE[m.from_user.id]["code"]
-        file_id = ADMIN_STATE[m.from_user.id]["file_id"]
+        code = ADMIN_STATE[message.from_user.id]["code"]
+        file_id = ADMIN_STATE[message.from_user.id]["file_id"]
         with open(os.path.join(MOVIES_DIR, f"{code}.txt"), "w", encoding="utf-8") as f:
             f.write(f"full|{file_id}\n")
-        ADMIN_STATE.pop(m.from_user.id)
+        ADMIN_STATE.pop(message.from_user.id)
         await message.answer(f"✅ Kino muvaffaqiyatli qo‘shildi!\n🎬 Kod: {code}")
 
-@dp.message_handler(lambda m: m.from_user.id in ADMIN_STATE and ADMIN_STATE[m.from_user.id].get("mode") == "part" and "code" in ADMIN_STATE[m.from_user.id] and "part" not in ADMIN_STATE[m.from_user.id])
+@dp.message_handler(lambda message: message.from_user.id in ADMIN_STATE and ADMIN_STATE[message.from_user.id].get("mode") == "part" and "code" in ADMIN_STATE[message.from_user.id] and "part" not in ADMIN_STATE[message.from_user.id])
 async def handle_admin_part_name(message: types.Message):
-    ADMIN_STATE[m.from_user.id]["part"] = message.text.strip()
+    ADMIN_STATE[message.from_user.id]["part"] = message.text.strip()
     state = ADMIN_STATE.pop(message.from_user.id)
     path = os.path.join(MOVIES_DIR, f"{state['code']}.txt")
     with open(path, "a", encoding="utf-8") as f:
@@ -147,7 +145,7 @@ async def handle_admin_part_name(message: types.Message):
     await message.answer("✅ Qism muvaffaqiyatli qo‘shildi.")
 
 # ===== Kino ko‘rish =====
-@dp.message_handler(lambda m: m.text and not m.text.startswith("/") and m.from_user.id not in admin_ids)
+@dp.message_handler(lambda message: message.text and not message.text.startswith("/") and message.from_user.id not in admin_ids)
 async def handle_user_code(message: types.Message):
     code = message.text.strip()
     path = os.path.join(MOVIES_DIR, f"{code}.txt")
@@ -183,7 +181,7 @@ async def send_movie_part(call: types.CallbackQuery):
     await call.message.answer("❌ Qism topilmadi.")
 
 # ===== Statistika =====
-@dp.message_handler(lambda m: m.text == "📊 Statistika")
+@dp.message_handler(lambda message: message.text == "📊 Statistika")
 async def stats(message: types.Message):
     if message.from_user.id not in admin_ids:
         return
@@ -193,14 +191,14 @@ async def stats(message: types.Message):
     await message.answer(f"📊 Jami kinolar: {total_movies}\n🎞 Jami qismlar: {total_parts}\n👥 Foydalanuvchilar soni: {user_count}")
 
 # ===== Kino o‘chirish =====
-@dp.message_handler(lambda m: m.text == "🗑 Kinoni o‘chirish")
+@dp.message_handler(lambda message: message.text == "🗑 Kinoni o‘chirish")
 async def delete_movie_start(message: types.Message):
     if message.from_user.id not in admin_ids:
         return
     ADMIN_STATE[message.from_user.id] = {"mode": "delete"}
     await message.answer("❌ O‘chirish uchun kino kodini yuboring.")
 
-@dp.message_handler(lambda m: m.from_user.id in ADMIN_STATE and ADMIN_STATE[m.from_user.id].get("mode") == "delete")
+@dp.message_handler(lambda message: message.from_user.id in ADMIN_STATE and ADMIN_STATE[message.from_user.id].get("mode") == "delete")
 async def delete_movie_confirm(message: types.Message):
     code = message.text.strip()
     path = os.path.join(MOVIES_DIR, f"{code}.txt")
@@ -212,21 +210,21 @@ async def delete_movie_confirm(message: types.Message):
     ADMIN_STATE.pop(message.from_user.id, None)
 
 # ===== Kanal qo‘shish va o‘chirish =====
-@dp.message_handler(lambda m: m.text == "➕ Kanal qo‘shish")
+@dp.message_handler(lambda message: message.text == "➕ Kanal qo‘shish")
 async def add_channel_start(message: types.Message):
     if message.from_user.id not in admin_ids:
         return
     ADMIN_STATE[message.from_user.id] = {"mode": "add_channel"}
     await message.answer("📢 Kanal username’ini yuboring (@siz)")
 
-@dp.message_handler(lambda m: m.text == "➖ Kanal o‘chirish")
+@dp.message_handler(lambda message: message.text == "➖ Kanal o‘chirish")
 async def remove_channel_start(message: types.Message):
     if message.from_user.id not in admin_ids:
         return
     ADMIN_STATE[message.from_user.id] = {"mode": "remove_channel"}
     await message.answer("📛 O‘chirish uchun kanal username’ini yuboring (@siz)")
 
-@dp.message_handler(lambda m: m.from_user.id in ADMIN_STATE and ADMIN_STATE[m.from_user.id]["mode"] in ["add_channel", "remove_channel"])
+@dp.message_handler(lambda message: message.from_user.id in ADMIN_STATE and ADMIN_STATE[message.from_user.id]["mode"] in ["add_channel", "remove_channel"])
 async def handle_channel_ops(message: types.Message):
     state = ADMIN_STATE.pop(message.from_user.id)
     username = message.text.strip()
