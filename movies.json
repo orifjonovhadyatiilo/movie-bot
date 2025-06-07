@@ -1,0 +1,173 @@
+import os
+import json
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
+from dotenv import load_dotenv
+
+# ===== Load environment =====
+load_dotenv()
+API_TOKEN = os.getenv("BOT_TOKEN")
+REQUIRED_CHANNELS = ["@orifjonov_top", "@moviecodedfschannel"]
+admin_ids = [123456789]  # <-- o'zingizning Telegram ID'ingizni yozing
+
+# ===== Initialize bot =====
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
+MOVIE_FILE = "movies.json"
+TEMP_FILE = "upload_temp.json"
+
+# ===== JSON helpers =====
+def load_movies():
+    if not os.path.exists(MOVIE_FILE):
+        return {}
+    with open(MOVIE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_movies(movies):
+    with open(MOVIE_FILE, "w", encoding="utf-8") as f:
+        json.dump(movies, f, indent=2)
+
+# ===== Admin keyboard =====
+def admin_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(
+        KeyboardButton("📊 Statistika"),
+        KeyboardButton("🎬 Kino qo‘shish"),
+        KeyboardButton("🎞 Qism qo‘shish")
+    )
+    return markup
+
+# ===== Check subscription =====
+async def check_subscriptions(user_id):
+    for channel in REQUIRED_CHANNELS:
+        member = await bot.get_chat_member(channel, user_id)
+        if member.status in ("left", "kicked"):
+            return False
+    return True
+
+# ===== /start handler =====
+@dp.message_handler(commands=["start"])
+async def start_cmd(message: types.Message):
+    if await check_subscriptions(message.from_user.id):
+        text = f"👋 Assalomu alaykum {message.from_user.first_name}, botimizga xush kelibsiz.\n\n✍🏻 Kino kodini yuboring..."
+        if message.from_user.id in admin_ids:
+            await message.answer(text, reply_markup=admin_keyboard())
+        else:
+            await message.answer(text, reply_markup=types.ReplyKeyboardRemove())
+    else:
+        markup = InlineKeyboardMarkup()
+        for ch in REQUIRED_CHANNELS:
+            markup.add(InlineKeyboardButton(f"➕ {ch}", url=f"https://t.me/{ch[1:]}"))
+        markup.add(InlineKeyboardButton("✅ Tekshirish", callback_data="check_subs"))
+        await message.answer("❌ Iltimos, quyidagi kanallarga obuna bo‘ling:", reply_markup=markup)
+
+# ===== Subscription check button =====
+@dp.callback_query_handler(lambda c: c.data == "check_subs")
+async def check_subs_callback(call: types.CallbackQuery):
+    if await check_subscriptions(call.from_user.id):
+        text = f"👋 Assalomu alaykum {call.from_user.first_name}, botimizga xush kelibsiz.\n\n✍🏻 Kino kodini yuboring..."
+        if call.from_user.id in admin_ids:
+            await call.message.edit_text(text)
+            await call.message.answer(text, reply_markup=admin_keyboard())
+        else:
+            await call.message.edit_text(text)
+            await call.message.answer(text, reply_markup=types.ReplyKeyboardRemove())
+    else:
+        await call.answer("❌ Hali ham barcha kanallarga obuna bo‘lmagansiz!", show_alert=True)
+
+# ===== Handle movie code =====
+@dp.message_handler(lambda m: not m.text.startswith("/") and m.text.strip())
+async def handle_movie_code(message: types.Message):
+    code = message.text.strip()
+    movies = load_movies()
+
+    if code in movies:
+        data = movies[code]
+        markup = InlineKeyboardMarkup(row_width=2)
+        for part in data["files"]:
+            markup.add(InlineKeyboardButton(part, callback_data=f"{code}:{part}"))
+        await message.answer(f"🎬 {data['title']}\nQaysi qismini ko‘rmoqchisiz?", reply_markup=markup)
+    else:
+        await message.answer("❌ Kino kodini noto‘g‘ri yubordingiz!")
+
+# ===== Send selected part =====
+@dp.callback_query_handler(lambda c: ":" in c.data)
+async def send_movie_part(call: types.CallbackQuery):
+    code, part = call.data.split(":")
+    movies = load_movies()
+
+    if code in movies and part in movies[code]["files"]:
+        file_id = movies[code]["files"][part]
+        await call.message.answer_chat_action("upload_video")
+        await call.message.answer_video(file_id)
+    else:
+        await call.message.answer("❌ Qism topilmadi.")
+
+# ===== Admin actions =====
+@dp.message_handler(lambda message: message.text in ["📊 Statistika", "🎬 Kino qo‘shish", "🎞 Qism qo‘shish"])
+async def admin_actions(message: types.Message):
+    if message.from_user.id not in admin_ids:
+        return await message.answer("❌ Siz admin emassiz.")
+
+    if message.text == "📊 Statistika":
+        movies = load_movies()
+        total_movies = len(movies)
+        total_parts = sum(len(m["files"]) for m in movies.values())
+        await message.answer(f"🎬 Jami kinolar: {total_movies}\n🎞 Jami qismlar: {total_parts}")
+
+    elif message.text == "🎬 Kino qo‘shish":
+        await message.answer("📝 Yangi kino kodi va nomini quyidagicha yuboring:\n\n`abc123 | Titanic`", parse_mode="Markdown")
+
+    elif message.text == "🎞 Qism qo‘shish":
+        await message.answer("📎 Kino kodini va qism nomini quyidagicha yuboring:\n\n`abc123 | 1-qism`\n\nSo‘ng video jo‘nating.")
+
+# ===== Handle kino qo‘shish =====
+@dp.message_handler(lambda m: "|" in m.text)
+async def handle_code_title_or_part(message: types.Message):
+    if message.from_user.id not in admin_ids:
+        return
+
+    code, name = [x.strip() for x in message.text.split("|", 1)]
+    movies = load_movies()
+
+    if code not in movies:
+        # Yangi kino
+        movies[code] = {"title": name, "files": {}}
+        save_movies(movies)
+        await message.answer(f"✅ {name} nomli kino qo‘shildi.")
+    else:
+        # Qism qo‘shish rejimi
+        with open(TEMP_FILE, "w", encoding="utf-8") as f:
+            json.dump({"code": code, "part": name}, f)
+        await message.answer("📎 Endi shu qism videosini yuboring.")
+
+# ===== Video upload handler =====
+@dp.message_handler(content_types=types.ContentType.VIDEO)
+async def handle_video_upload(message: types.Message):
+    if message.from_user.id not in admin_ids:
+        return
+
+    if not os.path.exists(TEMP_FILE):
+        return await message.answer("❗ Avval kod va qism nomini yuboring: `abc123 | 1-qism`", parse_mode="Markdown")
+
+    with open(TEMP_FILE, "r", encoding="utf-8") as f:
+        temp = json.load(f)
+
+    code = temp["code"]
+    part = temp["part"]
+    file_id = message.video.file_id
+
+    movies = load_movies()
+    if code not in movies:
+        return await message.answer("❌ Bunday kodli kino mavjud emas.")
+
+    movies[code]["files"][part] = file_id
+    save_movies(movies)
+
+    await message.answer(f"✅ {part} muvaffaqiyatli saqlandi.")
+    os.remove(TEMP_FILE)
+
+# ===== Start polling =====
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
