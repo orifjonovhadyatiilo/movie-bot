@@ -1,7 +1,7 @@
 pip==25.2
 setuptools
 wheel
-aiohttp==3.9.5
+aiohttp==3.8.6
 aiogram==2.25.2
 python-dotenv
 flask
