@@ -1,184 +1,244 @@
-import os
 import json
+import os
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from dotenv import load_dotenv
+from flask import Flask, request
+import logging
 
-# ==== CONFIG ====
+# ------------------- CONFIG -------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMINS = list(map(int, os.getenv("ADMINS", "").split(",")))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split()))
 
+# Fayl nomlari
+MOVIES_FILE = "movies.json"
+CHANNELS_FILE = "channels.json"
+
+# ------------------- BOT & APP -------------------
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
+dp.middleware.setup(LoggingMiddleware())
 
-# ==== FILE PATHS ====
-MOVIES_FILE = "data/movies.json"
-CHANNELS_FILE = "data/channels.json"
+app = Flask(__name__)
 
-# ==== HELPERS ====
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
+# ------------------- HELPERS -------------------
+def load_movies():
+    if not os.path.exists(MOVIES_FILE):
+        with open(MOVIES_FILE, "w") as f:
+            json.dump({}, f)
+    with open(MOVIES_FILE, "r") as f:
         return json.load(f)
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+def save_movies(data):
+    with open(MOVIES_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-movies_db = load_json(MOVIES_FILE)
-channels_db = load_json(CHANNELS_FILE)
+def load_channels():
+    if not os.path.exists(CHANNELS_FILE):
+        with open(CHANNELS_FILE, "w") as f:
+            json.dump([], f)
+    with open(CHANNELS_FILE, "r") as f:
+        return json.load(f)
 
-def save_movies():
-    save_json(MOVIES_FILE, movies_db)
+def save_channels(data):
+    with open(CHANNELS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-def save_channels():
-    save_json(CHANNELS_FILE, channels_db)
+# ------------------- FSM -------------------
+class AddMovie(StatesGroup):
+    waiting_for_video = State()
+    waiting_for_code = State()
 
-# ==== ADMIN PANEL ====
-@dp.message_handler(commands=["start"])
+class AddEpisode(StatesGroup):
+    waiting_for_code = State()
+    waiting_for_video = State()
+
+class DeleteMovie(StatesGroup):
+    waiting_for_code = State()
+    waiting_for_episode_choice = State()
+
+class AddChannel(StatesGroup):
+    waiting_for_channel_username = State()
+
+class DeleteChannel(StatesGroup):
+    waiting_for_channel_username = State()
+
+# ------------------- ADMIN PANEL -------------------
+def admin_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🎬 Kino qo‘shish", "🎞 Qism qo‘shish")
+    kb.add("🗑 Kino o‘chirish")
+    kb.add("➕ Kanal qo‘shish", "➖ Kanal o‘chirish")
+    kb.add("📊 Statistika")
+    return kb
+
+# ------------------- START -------------------
+@dp.message_handler(commands=['start'])
 async def start_cmd(message: types.Message):
-    if message.from_user.id in ADMINS:
+    user_id = message.from_user.id
+    if user_id in ADMIN_IDS:
+        await message.answer("Admin panelga xush kelibsiz!", reply_markup=admin_keyboard())
+    else:
+        await message.answer("Salom! Kino kodini yuboring va men sizga qismlarni chiqaraman.")
+
+# ------------------- ADD MOVIE -------------------
+@dp.message_handler(lambda m: m.text == "🎬 Kino qo‘shish", user_id=ADMIN_IDS)
+async def add_movie_start(message: types.Message):
+    await message.answer("Kinoni video formatida yuboring (doimiy video).")
+    await AddMovie.waiting_for_video.set()
+
+@dp.message_handler(content_types=types.ContentType.VIDEO, state=AddMovie.waiting_for_video, user_id=ADMIN_IDS)
+async def add_movie_video(message: types.Message, state: FSMContext):
+    await state.update_data(video_id=message.video.file_id)
+    await message.answer("Kinoni qaysi kod bilan nomlamoqchisiz?")
+    await AddMovie.waiting_for_code.set()
+
+@dp.message_handler(state=AddMovie.waiting_for_code, user_id=ADMIN_IDS)
+async def add_movie_code(message: types.Message, state: FSMContext):
+    code = str(message.text).strip()
+    data = await state.get_data()
+    movies = load_movies()
+    movies[code] = {"main": data['video_id'], "episodes": {}}
+    save_movies(movies)
+    await message.answer("✅ Kino muvaffaqiyatli saqlandi!", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ------------------- ADD EPISODE -------------------
+@dp.message_handler(lambda m: m.text == "🎞 Qism qo‘shish", user_id=ADMIN_IDS)
+async def add_episode_start(message: types.Message):
+    await message.answer("Qaysi kodga qism qo‘shmoqchisiz?")
+    await AddEpisode.waiting_for_code.set()
+
+@dp.message_handler(state=AddEpisode.waiting_for_code, user_id=ADMIN_IDS)
+async def add_episode_code(message: types.Message, state: FSMContext):
+    code = str(message.text).strip()
+    movies = load_movies()
+    if code not in movies:
+        await message.answer("❌ Bunday kodli kino topilmadi.")
+        await state.finish()
+        return
+    await state.update_data(code=code)
+    await message.answer("Qism videosini yuboring (doimiy video).")
+    await AddEpisode.waiting_for_video.set()
+
+@dp.message_handler(content_types=types.ContentType.VIDEO, state=AddEpisode.waiting_for_video, user_id=ADMIN_IDS)
+async def add_episode_video(message: types.Message, state: FSMContext):
+    video_id = message.video.file_id
+    data = await state.get_data()
+    movies = load_movies()
+    code = data['code']
+    episode_number = len(movies[code]["episodes"]) + 1
+    movies[code]["episodes"][str(episode_number)] = video_id
+    save_movies(movies)
+    await message.answer(f"✅ {code} kodli kino uchun {episode_number}-qism qo‘shildi.", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ------------------- DELETE MOVIE -------------------
+@dp.message_handler(lambda m: m.text == "🗑 Kino o‘chirish", user_id=ADMIN_IDS)
+async def delete_movie_start(message: types.Message):
+    await message.answer("Qaysi kodli kinoni o‘chirmoqchisiz?")
+    await DeleteMovie.waiting_for_code.set()
+
+@dp.message_handler(state=DeleteMovie.waiting_for_code, user_id=ADMIN_IDS)
+async def delete_movie_code(message: types.Message, state: FSMContext):
+    code = str(message.text).strip()
+    movies = load_movies()
+    if code not in movies:
+        await message.answer("❌ Bunday kod topilmadi.")
+        await state.finish()
+        return
+
+    if movies[code]["episodes"]:
         kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("🎬 Kino qo‘shish", callback_data="add_movie"))
-        kb.add(InlineKeyboardButton("➕ Qism qo‘shish", callback_data="add_part"))
-        kb.add(InlineKeyboardButton("🗑 Kino o‘chirish", callback_data="delete_movie"))
-        kb.add(InlineKeyboardButton("📢 Kanal qo‘shish", callback_data="add_channel"))
-        kb.add(InlineKeyboardButton("❌ Kanal o‘chirish", callback_data="delete_channel"))
-        await message.answer("Admin panel:", reply_markup=kb)
+        for ep in movies[code]["episodes"].keys():
+            kb.add(InlineKeyboardButton(f"{ep}-qismni o‘chirish", callback_data=f"del_ep:{code}:{ep}"))
+        kb.add(InlineKeyboardButton("📌 Hammasini o‘chirish", callback_data=f"del_all:{code}"))
+        await message.answer("Qaysi qismini o‘chirasiz?", reply_markup=kb)
+        await state.finish()
     else:
-        # Majburiy obuna tekshirish
-        for ch in channels_db.get("channels", []):
-            try:
-                user = await bot.get_chat_member(ch, message.from_user.id)
-                if user.status not in ["member", "administrator", "creator"]:
-                    await message.answer("Botdan foydalanish uchun quyidagi kanallarga obuna bo‘ling:")
-                    for ch in channels_db.get("channels", []):
-                        await message.answer(f"https://t.me/{ch.replace('@','')}")
-                    return
-            except:
-                pass
-        await message.answer("Salom! Kino kodini yuboring.")
+        del movies[code]
+        save_movies(movies)
+        await message.answer("✅ Kino o‘chirildi.", reply_markup=admin_keyboard())
+        await state.finish()
 
-# ==== ADMIN ACTIONS ====
-@dp.callback_query_handler(lambda c: c.data == "add_movie")
-async def admin_add_movie(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
+@dp.callback_query_handler(lambda c: c.data.startswith("del_ep:") or c.data.startswith("del_all:"))
+async def delete_episode_callback(callback_query: types.CallbackQuery):
+    data = callback_query.data.split(":")
+    movies = load_movies()
+    if data[0] == "del_ep":
+        code, ep = data[1], data[2]
+        del movies[code]["episodes"][ep]
+        save_movies(movies)
+        await callback_query.message.answer(f"✅ {code} kodli kino {ep}-qismi o‘chirildi.")
+    elif data[0] == "del_all":
+        code = data[1]
+        del movies[code]
+        save_movies(movies)
+        await callback_query.message.answer(f"✅ {code} kodli kino barcha qismlari bilan o‘chirildi.")
+
+# ------------------- USER REQUEST MOVIE -------------------
+@dp.message_handler()
+async def get_movie_by_code(message: types.Message):
+    code = str(message.text).strip()
+    channels = load_channels()
+    if channels:
+        for ch in channels:
+            member = await bot.get_chat_member(ch, message.from_user.id)
+            if member.status == "left":
+                kb = InlineKeyboardMarkup()
+                for c in channels:
+                    kb.add(InlineKeyboardButton(f"📢 {c}", url=f"https://t.me/{c.lstrip('@')}"))
+                kb.add(InlineKeyboardButton("✅ Tekshirish", callback_data="check_sub"))
+                await message.answer("❗ Avval quyidagi kanallarga obuna bo‘ling:", reply_markup=kb)
+                return
+    movies = load_movies()
+    if code not in movies:
+        await message.answer("❌ Bunday kod topilmadi.")
         return
-    await callback.message.answer("🎥 Kinoni video formatda yuboring.")
-    dp.register_message_handler(process_movie_video, content_types=["video"], state=None)
-
-async def process_movie_video(message: types.Message):
-    video = message.video.file_id
-    await message.answer("Kodni kiriting:")
-    dp.register_message_handler(lambda msg: save_movie(msg, video), content_types=["text"], state=None)
-
-async def save_movie(message: types.Message, video_id):
-    code = message.text.strip()
-    if code in movies_db:
-        await message.answer("❌ Bu kod band.")
-    else:
-        movies_db[code] = {"parts": [video_id]}
-        save_movies()
-        await message.answer("✅ Muvoffaqiyatli saqlandi.")
-
-@dp.callback_query_handler(lambda c: c.data == "add_part")
-async def admin_add_part(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
-        return
-    await callback.message.answer("Kodini yuboring:")
-    dp.register_message_handler(process_part_code, content_types=["text"], state=None)
-
-async def process_part_code(message: types.Message):
-    code = message.text.strip()
-    if code not in movies_db:
-        await message.answer("❌ Kod topilmadi.")
-        return
-    await message.answer("Qism videosini yuboring.")
-    dp.register_message_handler(lambda msg: save_part(msg, code), content_types=["video"], state=None)
-
-async def save_part(message: types.Message, code):
-    video = message.video.file_id
-    movies_db[code]["parts"].append(video)
-    save_movies()
-    await message.answer("✅ Qism qo‘shildi.")
-
-@dp.callback_query_handler(lambda c: c.data == "delete_movie")
-async def admin_delete_movie(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
-        return
-    await callback.message.answer("Kodini yuboring:")
-    dp.register_message_handler(process_delete_code, content_types=["text"], state=None)
-
-async def process_delete_code(message: types.Message):
-    code = message.text.strip()
-    if code not in movies_db:
-        await message.answer("❌ Kod topilmadi.")
-        return
-    del movies_db[code]
-    save_movies()
-    await message.answer("✅ O‘chirildi.")
-
-@dp.callback_query_handler(lambda c: c.data == "add_channel")
-async def admin_add_channel(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
-        return
-    await callback.message.answer("Kanal username (@ bilan) yuboring:")
-    dp.register_message_handler(process_add_channel, content_types=["text"], state=None)
-
-async def process_add_channel(message: types.Message):
-    ch = message.text.strip()
-    channels = channels_db.get("channels", [])
-    if ch not in channels:
-        channels.append(ch)
-        channels_db["channels"] = channels
-        save_channels()
-        await message.answer("✅ Kanal qo‘shildi.")
-    else:
-        await message.answer("❌ Bu kanal allaqachon qo‘shilgan.")
-
-@dp.callback_query_handler(lambda c: c.data == "delete_channel")
-async def admin_delete_channel(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
-        return
-    await callback.message.answer("O‘chirish uchun kanal username yuboring:")
-    dp.register_message_handler(process_delete_channel, content_types=["text"], state=None)
-
-async def process_delete_channel(message: types.Message):
-    ch = message.text.strip()
-    channels = channels_db.get("channels", [])
-    if ch in channels:
-        channels.remove(ch)
-        channels_db["channels"] = channels
-        save_channels()
-        await message.answer("✅ O‘chirildi.")
-    else:
-        await message.answer("❌ Kanal topilmadi.")
-
-# ==== USER REQUEST ====
-@dp.message_handler(content_types=["text"])
-async def get_movie(message: types.Message):
-    code = message.text.strip()
-    if code not in movies_db:
-        await message.answer("❌ Kod topilmadi.")
-        return
-    parts = movies_db[code]["parts"]
-    if len(parts) == 1:
-        await message.answer_video(parts[0])
-    else:
+    if movies[code]["episodes"]:
         kb = InlineKeyboardMarkup()
-        for idx, part in enumerate(parts, start=1):
-            kb.add(InlineKeyboardButton(f"{idx}-qism", callback_data=f"sendpart:{code}:{idx}"))
-        await message.answer("Qaysi qismini yuboray?", reply_markup=kb)
+        for ep, vid in movies[code]["episodes"].items():
+            kb.add(InlineKeyboardButton(f"{ep}-qism", callback_data=f"get_ep:{code}:{ep}"))
+        await message.answer("Qaysi qismini tomosha qilasiz?", reply_markup=kb)
+    else:
+        await message.answer_video(movies[code]["main"])
 
-@dp.callback_query_handler(lambda c: c.data.startswith("sendpart:"))
-async def send_part(callback: types.CallbackQuery):
-    _, code, idx = callback.data.split(":")
-    idx = int(idx)
-    await callback.message.answer_video(movies_db[code]["parts"][idx - 1])
+@dp.callback_query_handler(lambda c: c.data.startswith("get_ep:"))
+async def send_episode(callback_query: types.CallbackQuery):
+    _, code, ep = callback_query.data.split(":")
+    movies = load_movies()
+    video_id = movies[code]["episodes"][ep]
+    await callback_query.message.answer_video(video_id)
+
+@dp.callback_query_handler(lambda c: c.data == "check_sub")
+async def check_subscription(callback_query: types.CallbackQuery):
+    channels = load_channels()
+    for ch in channels:
+        member = await bot.get_chat_member(ch, callback_query.from_user.id)
+        if member.status == "left":
+            await callback_query.answer("❌ Hali ham barcha kanallarga obuna bo‘lmadingiz!", show_alert=True)
+            return
+    await callback_query.message.answer("✅ Obuna tasdiqlandi! Endi kino kodini yuboring.")
+
+# ------------------- WEBHOOK -------------------
+@app.route("/", methods=["POST"])
+def webhook():
+    update = types.Update(**request.json)
+    dp.process_update(update)
+    return "ok"
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot ishlayapti!"
 
 if __name__ == "__main__":
-    os.makedirs("data", exist_ok=True)
+    logging.basicConfig(level=logging.INFO)
     executor.start_polling(dp, skip_updates=True)
